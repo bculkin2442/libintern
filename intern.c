@@ -1,6 +1,7 @@
 #include <assert.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stdbool.h>
 
 /* Debugging. */
 #include <stdio.h>
@@ -41,7 +42,12 @@ static unsigned long hashstring(const char *val) {
 	return hash;
 }
 
-/* Convert an integer to a hashcode. */
+/*
+ * Convert an integer to a hashcode.
+ *
+ * This isn't a great algorithm for arbitrary ints, but it works okay for
+ * sequential keys.
+ */
 static unsigned long hashkey(const int val) {
 	return val;
 }
@@ -107,7 +113,7 @@ struct interntab *makeinterntab() {
 }
 
 /* Destroy a bucket chain. */
-static void killbucket(struct bucket *buck, int freestrings) {
+static void killbucket(struct bucket *buck, bool freestrings) {
 	/* Terminate the chain. */
 	/*
 	 * NOTE:
@@ -127,23 +133,28 @@ static void killbucket(struct bucket *buck, int freestrings) {
 		buck = buck->next;
 
 		/* Free the string we own. */
-		if(tmp->val != NULL && freestrings == 1) free(tmp->val);
+		if(tmp->val != NULL && freestrings == true) free(tmp->val);
+
 		/* Free the bucket. */
 		free(tmp);
 	}
 }
 
+/* Destroy an intern table */
 void killinterntab(struct interntab *table) {
 	/* Loop index. */
 	int i;
 
 	/* Free strings table. */
 	for(i = 0; i < BUCKET_COUNT; i++) {
-		killbucket(table->strings[i], 0);
+		/* Don't destroy these yet, since the keys table still uses them. */
+		killbucket(table->strings[i], false);
 	}
+
 	/* Free keys table. */
 	for(i = 0; i < BUCKET_COUNT; i++) {
-		killbucket(table->keys[i], 1);
+		/* Fine to destroy the strings now. */
+		killbucket(table->keys[i], true);
 	}
 
 	free(table);
@@ -183,8 +194,10 @@ static void addbucket(struct bucket *bucket) {
 internkey internstring(struct interntab *table, const char *string) {
 	/* The intern key we use. */
 	internkey key;
+
 	/* The key/string hashes. */
 	int khash, shash;
+
 	/* The string/key buckets. */
 	struct bucket *sbucket, *kbucket;
 
@@ -195,8 +208,10 @@ internkey internstring(struct interntab *table, const char *string) {
 	/* Get the next valid intern key. */
 	key = table->nextkey;
 	table->nextkey += 1;
+
 	/* Fail if we ran out of space for strings. */
 	if(key < 0) return SITABFULL;
+
 	/* Make sure we never make the invalid key valid. */
 	assert(key != SIINVALID);
 
@@ -219,6 +234,7 @@ internkey internstring(struct interntab *table, const char *string) {
 		 */
 		sbucket = sbucket->prev;
 	}
+
 	if(kbucket->key != SIINVALID) {
 		/*
 		 * Non-empty bucket. 
@@ -246,8 +262,10 @@ internkey internstring(struct interntab *table, const char *string) {
 internkey lookupstring(struct interntab *table, const char *string) {
 	/* The string hash. */
 	int shash;
+
 	/* The string bucket. */
 	struct bucket *sbucket;
+
 	/* The first key in a bucket. */
 	int fkey;
 
@@ -280,8 +298,10 @@ internkey lookupstring(struct interntab *table, const char *string) {
 const char *lookupkey(struct interntab *table, const internkey key) {
 	/* The key hash. */
 	int khash;
+
 	/* The key bucket. */
 	struct bucket *kbucket;
+
 	/* The first key in a bucket. */
 	int fkey;
 
@@ -313,13 +333,18 @@ const char *lookupkey(struct interntab *table, const internkey key) {
 
 /* Execute an action for every key in a table. */
 void foreachintern(struct interntab *table, tableitr itr, void *pvData) {
+	/* Loop index. */
 	int i;
+
 	/* Iterate over every bucket. */
 	for(i = 0; i < BUCKET_COUNT; i++) {
+		/* The bucket to iterate over. */
 		struct bucket *buck;
+
+		/* The first key in said bucket. */
 		internkey      kFirst;
 		
-		/* Get the first bucket, and its key. */
+		/* Get the first bucket, and its initial key. */
 		buck = table->keys[i];
 		kFirst = buck->key;
 		
@@ -327,6 +352,8 @@ void foreachintern(struct interntab *table, tableitr itr, void *pvData) {
 		if(kFirst == SIINVALID) continue;
 
 		do {
+			/* Call the iterator. */
+
 			itr(buck->val, buck->key, pvData);
 			/* Bail out if we've looped or hit an empty bucket. */
 		} while(buck->key != kFirst && buck->key != SIINVALID);
@@ -364,12 +391,14 @@ struct internlist *makeinternlist(int initcap, void (*pfDestroy)(void *)) {
 
 	/* Create the key mapping. */
 	plList->ptKeys = makeinterntab();
+
 	/* Remember the destructor. */
 	plList->pfDestroy = pfDestroy;
 
 	/* Allocate space for the data. */
 	plList->paData = calloc(initcap, sizeof(void *));
 	assert(plList->paData != NULL);
+
 	/* Initialize capacity tracking. */
 	plList->dataspace = initcap;
 	plList->datausage = 0;
@@ -379,15 +408,20 @@ struct internlist *makeinternlist(int initcap, void (*pfDestroy)(void *)) {
 
 /* Destroy an intern list. */
 void killinternlist(struct internlist * plList) {
-	/* Destruct the contained data. */
+	/* Loop index. */
 	int i;
+
+	/* Destruct the contained data. */
 	for(i = 0; i < plList->datausage; i++) {
 		plList->pfDestroy(plList->paData[i]);
 	}
+
 	/* Free the data storage. */
 	free(plList->paData);
+
 	/* Free key storage. */
 	killinterntab(plList->ptKeys);
+
 	/* Free the list. */
 	free(plList);
 }
@@ -402,7 +436,9 @@ void putinternlist(struct internlist *plList, char *pszKey, void *pvData) {
 		/* Allocate more space for the list. */
 		plList->dataspace *= 2;
 		plList->dataspace += 1;
+
 		plList->paData     = realloc(plList->paData, sizeof(void *) * plList->dataspace);
+
 		/* Fail if allocation fails. */
 		assert(plList->paData != NULL);
 	}
@@ -425,6 +461,7 @@ void putinternlist(struct internlist *plList, char *pszKey, void *pvData) {
 void *getinternlist(struct internlist * plList, char *pszKey) {
 	/* Lookup the index. */
 	internkey kData = lookupstring(plList->ptKeys, pszKey);
+
 	/* Error if we don't have that key. */
 	if(kData == SIINVALID) return NULL;
 
@@ -436,6 +473,7 @@ void *getinternlist(struct internlist * plList, char *pszKey) {
 void deleteinternlist(struct internlist *plList, char *pszKey) {
 	/* Lookup the index. */
 	internkey kData = lookupstring(plList->ptKeys, pszKey);
+
 	/* Error if we don't have that key. */
 	if(kData == SIINVALID) return;
 
@@ -448,11 +486,12 @@ void deleteinternlist(struct internlist *plList, char *pszKey) {
 /* 
  * Check if an item is in an intern list. 
  *
- * Returns 0 if the item is not cotinained, 1 oterhwise.
+ * Returns 0 if the item is not contained, 1 otherwise.
  */
 int containsinternlist(struct internlist *plList, char *pszKey) {
 	/* Lookup the index. */
 	internkey kData = lookupstring(plList->ptKeys, pszKey);
+
 	/* Error if we don't have that key. */
 	if(kData == SIINVALID) {
 		return 0;
@@ -461,32 +500,43 @@ int containsinternlist(struct internlist *plList, char *pszKey) {
 	}
 }
 
+/* Internal data for list iteration. */
 struct listitrdata {
+	/* The list being iterated over. */
 	struct internlist *plList;
 
+	/* The action to call for each item. */
 	internlistitr pfFunc;
 
+	/* User data to provide to the action. */
 	void *pvData;
 };
 
+/* Do the work of iterating over a list. */
 static void dointernlistitr(const char *pszName, internkey kKey, void *pvData) {
+	/* The current list item. */
 	void *pvItem;
 
 	struct listitrdata *pData = (struct listitrdata *)pvData;
 
+	/* Get the list item. */
 	pvItem = getinternlist(pData->plList, (char *)pszName);
 
 	if(pvItem != NULL) {
+		/* Call the action. */
 		pData->pfFunc((char *)pszName, pvItem, pData->pvData);
 	}
 }
 
 void foreachinternlist(struct internlist *plList, internlistitr pfFunc, void *pvData) {
+	/* Data for the iterator. */
 	struct listitrdata dat;
 
+	/* Initialize iterator data. */
 	dat.pfFunc = pfFunc;
 	dat.plList = plList;
 	dat.pvData = pvData;
 
+	/* Iterate over the list with our action. */
 	foreachintern(plList->ptKeys, &dointernlistitr, &dat);
 }
